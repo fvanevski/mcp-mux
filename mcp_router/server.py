@@ -4,7 +4,9 @@ import logging
 import time
 from uuid import uuid4
 from contextlib import asynccontextmanager
+from typing import List, Optional, Dict
 from urllib.parse import urlparse, urlunparse
+import json
 import yaml
 import httpx
 from starlette.applications import Starlette
@@ -44,6 +46,47 @@ def get_target_url(config_url: str, request_path: str, path_prefix: str) -> str:
         parsed_cfg.fragment
     ))
     return target
+
+def filter_tools_response(line_or_body: str, allowed_tools: Optional[list[str]], denied_tools: Optional[list[str]]) -> str:
+    """
+    Parses a string (which may be a full JSON body or a single line of an SSE data payload),
+    detects if it represents a JSON-RPC tools/list response, and filters the returned
+    tools list based on allowed/denied configuration.
+    """
+    if allowed_tools is None and denied_tools is None:
+        return line_or_body
+
+    prefix = ""
+    json_str = line_or_body
+    if line_or_body.startswith("data: "):
+        prefix = "data: "
+        json_str = line_or_body[6:].strip()
+        
+    try:
+        data = json.loads(json_str)
+        if isinstance(data, dict) and "result" in data:
+            result = data["result"]
+            if isinstance(result, dict) and "tools" in result and isinstance(result["tools"], list):
+                original_tools = result["tools"]
+                
+                # Apply allowed/denied logic
+                # If both allowed and denied included, default to allowed tools and ignore deny list.
+                filtered_tools = []
+                if allowed_tools is not None:
+                    allowed_set = set(allowed_tools)
+                    filtered_tools = [t for t in original_tools if t.get("name") in allowed_set]
+                elif denied_tools is not None:
+                    denied_set = set(denied_tools)
+                    filtered_tools = [t for t in original_tools if t.get("name") not in denied_set]
+                else:
+                    filtered_tools = original_tools
+                
+                result["tools"] = filtered_tools
+                data["result"] = result
+                return f"{prefix}{json.dumps(data)}"
+    except Exception:
+        pass
+    return line_or_body
 
 class MCPRouter:
     def __init__(self, app: Starlette, config_path: str):
@@ -146,6 +189,10 @@ class MCPRouter:
                                         line = f"data: {new_path}"
                                     else:
                                         line = f"data: /{path_prefix}{data_content}"
+                            # Filter tools list response if configured
+                            ep_cfg = self._configs.get(path_prefix)
+                            if ep_cfg:
+                                line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
                             yield (line + "\n").encode("utf-8")
         finally:
             self.active_connections[path_prefix] = max(0, self.active_connections.get(path_prefix, 0) - 1)
@@ -233,7 +280,8 @@ class MCPRouter:
                     async def process_response():
                         try:
                             async for line in response.aiter_lines():
-                                await queue.put(line)
+                                filtered_line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                                await queue.put(filtered_line)
                         except Exception as e:
                             logger.error(f"Error reading response from streamable-http backend: {e}")
                         finally:
@@ -260,20 +308,50 @@ class MCPRouter:
                     
                     resp_headers = {k: v for k, v in response.headers.items() if k.lower() not in exclude_headers}
                     
-                    async def content_generator():
-                        try:
-                            async for chunk in response.aiter_bytes():
-                                yield chunk
-                        finally:
-                            await response_stream.__aexit__(None, None, None)
-                            await client.aclose()
-                            
-                    return StreamingResponse(
-                        content_generator(),
-                        status_code=response.status_code,
-                        headers=resp_headers,
-                        media_type=response.headers.get("content-type")
-                    )
+                    content_type = response.headers.get("content-type", "")
+                    if "application/json" in content_type.lower():
+                        body_bytes = await response.aread()
+                        await response_stream.__aexit__(None, None, None)
+                        await client.aclose()
+                        body_str = body_bytes.decode("utf-8", errors="replace")
+                        filtered_body = filter_tools_response(body_str, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                        return Response(
+                            content=filtered_body.encode("utf-8"),
+                            status_code=response.status_code,
+                            headers=resp_headers,
+                            media_type=content_type
+                        )
+                    elif "event-stream" in content_type.lower():
+                        async def sse_content_generator():
+                            try:
+                                async for line in response.aiter_lines():
+                                    filtered_line = filter_tools_response(line, ep_cfg.allowed_tools, ep_cfg.denied_tools)
+                                    yield (filtered_line + "\n").encode("utf-8")
+                            finally:
+                                await response_stream.__aexit__(None, None, None)
+                                await client.aclose()
+                                
+                        return StreamingResponse(
+                            sse_content_generator(),
+                            status_code=response.status_code,
+                            headers=resp_headers,
+                            media_type=content_type
+                        )
+                    else:
+                        async def content_generator():
+                            try:
+                                async for chunk in response.aiter_bytes():
+                                    yield chunk
+                            finally:
+                                await response_stream.__aexit__(None, None, None)
+                                await client.aclose()
+                                
+                        return StreamingResponse(
+                            content_generator(),
+                            status_code=response.status_code,
+                            headers=resp_headers,
+                            media_type=content_type
+                        )
                 except Exception as e:
                     logger.error(f"Proxy error for {path_prefix}: {e}")
                     return JSONResponse({"error": f"Proxy error: {e}"}, status_code=502)

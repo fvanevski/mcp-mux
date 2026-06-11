@@ -17,10 +17,15 @@ class EndpointConfig(BaseModel):
     summary: str
     timeout: int = 300  # Default to 300 seconds (5 minutes)
     transport: Optional[str] = None
+    allowed_tools: Optional[List[str]] = None
+    denied_tools: Optional[List[str]] = None
 
     @model_validator(mode="after")
     def validate_mode_requirements(self) -> "EndpointConfig":
         """Validate configuration requirements based on the mode."""
+        if self.allowed_tools is not None and self.denied_tools is not None:
+            self.denied_tools = None
+
         if self.transport is None:
             if self.url and (self.url.endswith("/mcp") or "/mcp/" in self.url):
                 self.transport = "streamable-http"

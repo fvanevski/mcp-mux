@@ -3,6 +3,10 @@ endpoints:
     mode: "remote"
     url: "https://mcp.garion.us/mcp"
     summary: "Google Search and content extraction tool"
+    # Example tool filtering: only expose these specific tools (allowlist)
+    # allowed_tools:
+    #   - "google_search"
+    #   - "batch_extract_urls"
 
   - path: "firecrawl"
     mode: "managed_cli"
@@ -10,3 +14,6 @@ endpoints:
     url: "http://localhost:3033/mcp"
     summary: "Firecrawl Web Content Extraction Tool"
     timeout: 300  # Automatically shuts down after 300 seconds of inactivity
+    allowed_tools:
+      - "firecrawl_search"
+      - "firecrawl_scrape"

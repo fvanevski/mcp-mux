@@ -235,3 +235,63 @@ async def test_streamable_http_bridge():
             
             await post_task
 
+
+# --- Tool Filtering Tests ---
+
+from mcp_router.server import filter_tools_response
+
+def test_endpoint_config_allowed_denied_validation():
+    # Both provided -> denied_tools is cleared to None (precedence to allowed)
+    cfg = EndpointConfig(
+        path="test",
+        mode="remote",
+        url="http://localhost/mcp",
+        summary="Test",
+        allowed_tools=["toolA"],
+        denied_tools=["toolB"]
+    )
+    assert cfg.allowed_tools == ["toolA"]
+    assert cfg.denied_tools is None
+
+    # Only allowed provided -> preserved
+    cfg_allow = EndpointConfig(
+        path="test",
+        mode="remote",
+        url="http://localhost/mcp",
+        summary="Test",
+        allowed_tools=["toolA"]
+    )
+    assert cfg_allow.allowed_tools == ["toolA"]
+    assert cfg_allow.denied_tools is None
+
+    # Only denied provided -> preserved
+    cfg_deny = EndpointConfig(
+        path="test",
+        mode="remote",
+        url="http://localhost/mcp",
+        summary="Test",
+        denied_tools=["toolB"]
+    )
+    assert cfg_deny.allowed_tools is None
+    assert cfg_deny.denied_tools == ["toolB"]
+
+def test_filter_tools_response_sse():
+    allowed = ["toolA"]
+    line = 'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"toolA"},{"name":"toolB"}]}}'
+    filtered = filter_tools_response(line, allowed, None)
+    assert filtered.startswith("data: ")
+    import json
+    data = json.loads(filtered[6:])
+    assert len(data["result"]["tools"]) == 1
+    assert data["result"]["tools"][0]["name"] == "toolA"
+
+def test_filter_tools_response_json():
+    denied = ["toolA"]
+    body = '{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"toolA"},{"name":"toolB"}]}}'
+    filtered = filter_tools_response(body, None, denied)
+    import json
+    data = json.loads(filtered)
+    assert len(data["result"]["tools"]) == 1
+    assert data["result"]["tools"][0]["name"] == "toolB"
+
+
