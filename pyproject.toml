@@ -1,0 +1,13 @@
+[project]
+name = "mcp-mux"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastmcp>=3.4.2",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pyyaml>=6.0.3",
+    "watchdog>=6.0.0",
+]

@@ -1,0 +1,19 @@
+endpoints:
+  - path: "weather-service"
+    mode: "remote"
+    url: "http://api.weather-mcp.local/mcp"
+    summary: "Fetches live weather, alerts, and forecasts."
+
+  - path: "filesystem-tools"
+    mode: "managed_cli"
+    command: "uvx"
+    args: ["mcp-server-filesystem", "--root", "/safe/dir"]
+    port: 8011
+    summary: "Secure filesystem read/write operations."
+
+  - path: "legacy-db-bridge"
+    mode: "stdio_bridge"
+    command: "npx"
+    args: ["-y", "supergateway", "npx", "-y", "stdio-db-server"]
+    port: 8012
+    summary: "Query interface bridged from standard I/O database manager."
