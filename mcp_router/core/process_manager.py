@@ -27,35 +27,39 @@ class ProcessManager:
             return
         self._initialized = True
 
+    def is_running(self, path: str) -> bool:
+        """Returns True if the process for path is running and hasn't exited."""
+        proc = self._processes.get(path)
+        if proc is None:
+            return False
+        return proc.returncode is None
+
     async def start_managed_server(self, endpoint_cfg: EndpointConfig) -> str:
         """
-        Spawns a local background server process.
+        Spawns a local background server process using asyncio.create_subprocess_shell.
         Returns the streamable target HTTP url.
         """
         path = endpoint_cfg.path
-        if path in self._processes:
-            logger.info(f"Stopping existing process for path '{path}' before reloading.")
-            await self.stop_managed_server(path)
+        if self.is_running(path):
+            logger.info(f"Process for path '{path}' is already running.")
+            return endpoint_cfg.url
 
         command = endpoint_cfg.command
-        args = list(endpoint_cfg.args)
-        port = endpoint_cfg.port
+        target_url = endpoint_cfg.url
 
-        # Automatically inject port/outputTransport options if using supergateway
-        if "supergateway" in command or any("supergateway" in str(a) for a in args):
-            if "--port" not in args:
-                args.extend(["--port", str(port)])
-            if "--outputTransport" not in args:
-                args.extend(["--outputTransport", "streamablehttp"])
+        # Parse port and host from url
+        from urllib.parse import urlparse
+        parsed = urlparse(target_url)
+        port = parsed.port or 80
+        host = parsed.hostname or "127.0.0.1"
 
-        logger.info(f"Spawning background process for path '{path}': {command} {' '.join(args)} on port {port}")
+        logger.info(f"Spawning background shell process for path '{path}': {command} on port {port}")
 
         try:
             # We use preexec_fn=os.setsid on Unix to isolate the process in a new process group.
-            # This ensures that when we kill the parent, we can cleanly kill any child processes too.
-            proc = await asyncio.create_subprocess_exec(
+            # This ensures that when we kill the shell, we cleanly kill all of its children.
+            proc = await asyncio.create_subprocess_shell(
                 command,
-                *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 preexec_fn=os.setsid if hasattr(os, "setsid") else None
@@ -68,8 +72,7 @@ class ProcessManager:
             self._log_tasks.extend([task_stdout, task_stderr])
 
             # Wait for local HTTP server port readiness
-            target_url = f"http://127.0.0.1:{port}/mcp"
-            success = await self._wait_for_port(port)
+            success = await self._wait_for_port(port, host=host)
             if not success:
                 if proc.returncode is not None:
                     raise RuntimeError(f"Process terminated instantly with exit code {proc.returncode}")
@@ -90,7 +93,10 @@ class ProcessManager:
             logger.info(f"Terminating subprocess group for '{path}' (PID {proc.pid})")
             try:
                 if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                 else:
                     proc.terminate()
 
@@ -99,12 +105,13 @@ class ProcessManager:
                 except asyncio.TimeoutError:
                     logger.warning(f"Process for '{path}' (PID {proc.pid}) did not exit. Forcing SIGKILL.")
                     if hasattr(os, "killpg") and hasattr(os, "getpgid"):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                     else:
                         proc.kill()
                     await proc.wait()
-            except ProcessLookupError:
-                pass
             except Exception as e:
                 logger.error(f"Error terminating process group for '{path}': {e}")
 

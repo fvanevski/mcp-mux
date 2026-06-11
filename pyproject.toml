@@ -11,3 +11,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "watchdog>=6.0.0",
 ]
+
+[tool.pyrefly]
+project-includes = [
+    "**/*.py*",
+    "**/*.ipynb",
+]

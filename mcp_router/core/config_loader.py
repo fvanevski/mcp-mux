@@ -15,18 +15,31 @@ class EndpointConfig(BaseModel):
     args: List[str] = Field(default_factory=list)
     port: Optional[int] = None
     summary: str
+    timeout: int = 300  # Default to 300 seconds (5 minutes)
+    transport: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_mode_requirements(self) -> "EndpointConfig":
         """Validate configuration requirements based on the mode."""
+        if self.transport is None:
+            if self.url and (self.url.endswith("/mcp") or "/mcp/" in self.url):
+                self.transport = "streamable-http"
+            else:
+                self.transport = "sse"
+
         if self.mode == "remote":
             if not self.url:
                 raise ValueError("url is required for remote mode")
-        elif self.mode in ("managed_cli", "stdio_bridge"):
+        elif self.mode == "managed_cli":
             if not self.command:
-                raise ValueError(f"command is required for {self.mode} mode")
+                raise ValueError("command is required for managed_cli mode")
+            if not self.url:
+                raise ValueError("url is required for managed_cli mode")
+        elif self.mode == "stdio_bridge":
+            if not self.command:
+                raise ValueError("command is required for stdio_bridge mode")
             if not self.port:
-                raise ValueError(f"port is required for {self.mode} mode")
+                raise ValueError("port is required for stdio_bridge mode")
         else:
             raise ValueError(f"Invalid mode: {self.mode}")
         return self
@@ -37,16 +50,27 @@ class RouterConfig(BaseModel):
     @model_validator(mode="after")
     def validate_ports_and_paths(self) -> "RouterConfig":
         """Enforce uniqueness for paths/namespaces and local ports."""
+        from urllib.parse import urlparse
         ports = []
         paths = []
         for ep in self.endpoints:
             if ep.path in paths:
                 raise ValueError(f"Duplicate path detected: {ep.path}")
             paths.append(ep.path)
-            if ep.port is not None:
-                if ep.port in ports:
-                    raise ValueError(f"Duplicate port detected: {ep.port}")
-                ports.append(ep.port)
+            
+            # Resolve port from either explicit port (stdio_bridge) or parsed url (managed_cli)
+            resolved_port = ep.port
+            if ep.mode == "managed_cli" and ep.url:
+                try:
+                    parsed = urlparse(ep.url)
+                    resolved_port = parsed.port
+                except Exception:
+                    pass
+                    
+            if resolved_port is not None:
+                if resolved_port in ports:
+                    raise ValueError(f"Duplicate port detected: {resolved_port}")
+                ports.append(resolved_port)
         return self
 
 class ConfigWatcher:

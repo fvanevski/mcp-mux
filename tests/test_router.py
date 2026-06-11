@@ -2,15 +2,15 @@ import asyncio
 import os
 import sys
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open
+from unittest.mock import AsyncMock, MagicMock, patch
+from starlette.testclient import TestClient
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mcp_router.core.config_loader import EndpointConfig, RouterConfig, ConfigWatcher
+from mcp_router.core.config_loader import EndpointConfig, RouterConfig
 from mcp_router.core.process_manager import ProcessManager
-from mcp_router.routes.discovery import setup_discovery
-from mcp_router.main import MCPRouter
+from mcp_router.server import app, router
 
 # --- Config Loader Tests ---
 
@@ -26,9 +26,8 @@ def test_valid_config():
             {
                 "path": "files",
                 "mode": "managed_cli",
-                "command": "uvx",
-                "args": ["mcp-server-filesystem"],
-                "port": 8011,
+                "command": "uvx mcp-server-filesystem",
+                "url": "http://localhost:8011/mcp",
                 "summary": "File tools"
             }
         ]
@@ -36,7 +35,8 @@ def test_valid_config():
     cfg = RouterConfig.model_validate(data)
     assert len(cfg.endpoints) == 2
     assert cfg.endpoints[0].path == "weather"
-    assert cfg.endpoints[1].port == 8011
+    assert cfg.endpoints[1].mode == "managed_cli"
+    assert cfg.endpoints[1].url == "http://localhost:8011/mcp"
 
 def test_config_port_collision():
     data = {
@@ -44,15 +44,15 @@ def test_config_port_collision():
             {
                 "path": "files1",
                 "mode": "managed_cli",
-                "command": "uvx",
-                "port": 8011,
+                "command": "uvx mcp-server-filesystem",
+                "url": "http://localhost:8011/mcp",
                 "summary": "Files 1"
             },
             {
                 "path": "files2",
                 "mode": "managed_cli",
-                "command": "uvx",
-                "port": 8011,
+                "command": "uvx mcp-server-filesystem",
+                "url": "http://localhost:8011/mcp",
                 "summary": "Files 2"
             }
         ]
@@ -93,6 +93,20 @@ def test_config_missing_remote_url():
     with pytest.raises(ValueError, match="url is required for remote mode"):
         RouterConfig.model_validate(data)
 
+def test_config_missing_managed_cli_url():
+    data = {
+        "endpoints": [
+            {
+                "path": "files",
+                "mode": "managed_cli",
+                "command": "uvx",
+                "summary": "Missing URL"
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="url is required for managed_cli mode"):
+        RouterConfig.model_validate(data)
+
 # --- Process Manager Tests ---
 
 @pytest.mark.asyncio
@@ -105,27 +119,26 @@ async def test_process_manager_lifecycle():
     cfg = EndpointConfig(
         path="mock-mcp",
         mode="managed_cli",
-        command="python",
-        args=["-m", "http.server", "8099"],
-        port=8099,
+        command="python -m http.server 8099",
+        url="http://localhost:8099/mcp",
         summary="Mock python server"
     )
 
-    # Mock the asyncio.create_subprocess_exec and _wait_for_port
+    # Mock the asyncio.create_subprocess_shell and _wait_for_port
     mock_proc = AsyncMock()
     mock_proc.pid = 99999
     mock_proc.returncode = None
     mock_proc.stdout = AsyncMock()
     mock_proc.stderr = AsyncMock()
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec, \
+    with patch("asyncio.create_subprocess_shell", return_value=mock_proc) as mock_shell, \
          patch.object(pm, "_wait_for_port", return_value=True) as mock_wait:
         
         target_url = await pm.start_managed_server(cfg)
         
-        assert target_url == "http://127.0.0.1:8099/mcp"
-        mock_exec.assert_called_once()
-        mock_wait.assert_called_once_with(8099)
+        assert target_url == "http://localhost:8099/mcp"
+        mock_shell.assert_called_once()
+        mock_wait.assert_called_once_with(8099, host="localhost")
         assert "mock-mcp" in pm._processes
 
         # Test stop
@@ -134,24 +147,10 @@ async def test_process_manager_lifecycle():
             mock_killpg.assert_called_once_with(123, 15)  # signal.SIGTERM is 15
             assert "mock-mcp" not in pm._processes
 
-# --- Routes Discovery Tests ---
+# --- Routes & App Tests ---
 
-@pytest.mark.asyncio
-async def test_discovery_route_response():
-    mcp_mock = MagicMock()
-    # Capture route decorator arguments
-    decorator_args = []
-    
-    def mock_custom_route(path, methods):
-        decorator_args.append((path, methods))
-        def inner(fn):
-            mcp_mock._route_fn = fn
-            return fn
-        return inner
-
-    mcp_mock.custom_route = mock_custom_route
-
-    configs = {
+def test_summary_route():
+    router._configs = {
         "weather": EndpointConfig(
             path="weather",
             mode="remote",
@@ -160,20 +159,79 @@ async def test_discovery_route_response():
         )
     }
 
-    setup_discovery(mcp_mock, configs)
-
-    assert len(decorator_args) == 1
-    assert decorator_args[0] == ("/summary", ["GET"])
-    assert hasattr(mcp_mock, "_route_fn")
-
-    # Invoke the endpoint
-    mock_req = MagicMock()
-    response = await mcp_mock._route_fn(mock_req)
+    client = TestClient(app)
+    response = client.get("/summary")
+    assert response.status_code == 200
     
-    import json
-    body = json.loads(response.body.decode("utf-8"))
-    assert "endpoints" in body
-    assert len(body["endpoints"]) == 1
-    assert body["endpoints"][0]["path"] == "weather"
-    assert body["endpoints"][0]["mode"] == "remote"
-    assert body["endpoints"][0]["summary"] == "Weather summary"
+    data = response.json()
+    assert "endpoints" in data
+    assert len(data["endpoints"]) == 1
+    assert data["endpoints"][0]["path"] == "weather"
+    assert data["endpoints"][0]["mode"] == "remote"
+    assert data["endpoints"][0]["summary"] == "Weather summary"
+
+def test_not_found_route():
+    client = TestClient(app)
+    response = client.get("/nonexistent")
+    assert response.status_code == 404
+    assert "configured" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_bridge():
+    router._configs = {
+        "weather": EndpointConfig(
+            path="weather",
+            mode="remote",
+            url="http://api.weather.com/mcp",
+            summary="Weather summary",
+            transport="streamable-http"
+        )
+    }
+    
+    import httpx
+    from httpx import AsyncClient
+    transport = httpx.ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Establish GET SSE connection and read the endpoint registration message
+        async with client.stream("GET", "/weather", headers={"Accept": "text/event-stream"}) as sse_res:
+            assert sse_res.status_code == 200
+            
+            lines_iter = sse_res.aiter_lines()
+            l1 = await anext(lines_iter)
+            l2 = await anext(lines_iter)
+            
+            assert "event: endpoint" in l1
+            assert "data: /weather?session_id=" in l2
+            session_id = l2.split("session_id=")[1]
+            
+            # 2. Prepare the background POST task that simulates remote backend response streaming
+            async def run_post(sid):
+                mock_response = MagicMock()
+                mock_response.status_code = 200
+                async def mock_aiter_lines():
+                    yield "event: message"
+                    yield "data: {\"result\":\"cloudy\"}"
+                    yield ""
+                mock_response.aiter_lines = mock_aiter_lines
+                
+                mock_stream = MagicMock()
+                mock_stream.__aenter__ = AsyncMock(return_value=mock_response)
+                mock_stream.__aexit__ = AsyncMock(return_value=None)
+                
+                with patch("httpx.AsyncClient.stream", return_value=mock_stream):
+                    post_res = await client.post(f"/weather?session_id={sid}", json={"jsonrpc":"2.0","id":1,"method":"foo"})
+                    assert post_res.status_code == 202
+                    assert post_res.text == "Accepted"
+            
+            post_task = asyncio.create_task(run_post(session_id))
+            
+            # 3. Read the bridged response message on the persistent GET SSE stream
+            l3 = await anext(lines_iter)
+            l4 = await anext(lines_iter)
+            
+            assert "event: message" in l3
+            assert "data: {\"result\":\"cloudy\"}" in l4
+            
+            await post_task
+
