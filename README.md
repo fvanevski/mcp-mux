@@ -49,6 +49,9 @@ endpoints:
     url: "https://mcp.garion.us/mcp"
     summary: "Google Search and content extraction tool"
     # transport: "streamable-http"  (Automatically detected due to /mcp path suffix)
+    allowed_tools:
+      - "google_search"
+      - "batch_extract_urls"
 
   # Managed CLI Mode (On-Demand)
   - path: "firecrawl"
@@ -57,6 +60,9 @@ endpoints:
     url: "http://localhost:3033/mcp"
     summary: "Firecrawl Web Content Extraction Tool"
     timeout: 300  # Automatically shuts down after 300 seconds of inactivity
+    denied_tools:
+      - "firecrawl_crawl"
+      - "firecrawl_map"
 ```
 
 ### Configuration Parameters
@@ -70,6 +76,8 @@ endpoints:
 | `summary` | String | Yes | Brief description of the sub-server, returned by `/summary`. |
 | `timeout` | Integer | No | Inactivity timeout in seconds for CLI mode (defaults to 300). |
 | `transport` | String | No | Transport mode (`sse` or `streamable-http`). Automatically detected if omitted. |
+| `allowed_tools` | List of Strings | No | Allowlist of tool names. Only these tools are exposed. |
+| `denied_tools` | List of Strings | No | Denylist of tool names. These tools are excluded. (Ignored if `allowed_tools` is set). |
 
 ---
 
